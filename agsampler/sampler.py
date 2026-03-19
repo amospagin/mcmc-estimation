@@ -125,11 +125,13 @@ def sample(
 
     # Initialize kernel states (in z-space)
     if kernel == "mclmc":
-        init_fn = partial(mclmc.init, logdensity_fn=transformed_logdensity)
-        states = jax.vmap(init_fn)(initial_positions, init_keys)
+        def _mclmc_init(pos, key):
+            return mclmc.init(pos, transformed_logdensity, key)
+        states = jax.vmap(_mclmc_init)(initial_positions, init_keys)
     else:
-        init_fn = partial(nuts.init, logdensity_fn=transformed_logdensity)
-        states = jax.vmap(init_fn)(initial_positions)
+        def _nuts_init(pos):
+            return nuts.init(pos, transformed_logdensity)
+        states = jax.vmap(_nuts_init)(initial_positions)
 
     # --- Initialize adaptation ---
     ss_state = ss_adapt.init(initial_step_size)
