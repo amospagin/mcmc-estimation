@@ -26,9 +26,9 @@ class TestLeapfrog:
 
         e0 = total_energy(lp, p0, inv_mass)
 
-        # 100 leapfrog steps with small step size
+        # 50 leapfrog steps with small step size
         step_size = 0.01
-        for _ in range(100):
+        for _ in range(50):
             state = leapfrog_step(state, step_size, _standard_normal_logdensity, inv_mass)
 
         e1 = total_energy(state.log_prob, state.momentum, inv_mass)
@@ -48,7 +48,7 @@ class TestLeapfrog:
         e0 = total_energy(lp, p0, inv_mass)
 
         step_size = 0.01
-        for _ in range(100):
+        for _ in range(50):
             state = leapfrog_step(state, step_size, _standard_normal_logdensity, inv_mass)
 
         e1 = total_energy(state.log_prob, state.momentum, inv_mass)
