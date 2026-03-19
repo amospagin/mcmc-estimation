@@ -1,17 +1,25 @@
 """Main sampler orchestrator.
 
-Wires together: Model -> Transform -> Kernel -> Adaptation -> Diagnostics.
+Three-phase hybrid warmup strategy:
 
-The sampling loop:
-  1. Initialize chains (vmapped)
-  2. For each iteration:
-     a. Take one kernel step in transformed space
-     b. Accumulate model-space positions in sample buffer
-     c. Update adaptation (step size, mass matrix)
-     d. Periodically train the flow via score matching on the buffer
-     e. After flow update, remap chain states to new z-space
-     f. Check convergence
-  3. Return SampleResult
+  Phase 1 — NUTS exploration (when using a flow):
+    Run NUTS to get diverse samples and adapt step size + mass matrix.
+    NUTS adapts trajectory length per-step, so it can explore even with
+    bad geometry.  Samples are accumulated in a buffer.
+
+  Phase 2 — Flow training:
+    Train the affine coupling flow via score matching on the NUTS samples.
+    This teaches the flow the posterior geometry.  May repeat: alternate
+    between short NUTS runs and flow training rounds.
+
+  Phase 3 — Production sampling:
+    Run the selected kernel (MCLMC or NUTS) in the flow-transformed space.
+    The posterior in transformed space is approximately Gaussian, so
+    MCLMC is near-optimal.  Continue refining the flow periodically.
+
+Without a flow, the sampler runs the selected kernel with standard
+step size and mass matrix adaptation (equivalent to a typical NUTS/MCLMC
+sampler).
 """
 
 import jax
@@ -44,6 +52,7 @@ def sample(
     flow_train_interval: int = 50,
     flow_train_steps: int = 10,
     flow_lr: float = 1e-3,
+    nuts_warmup_steps: int | None = None,
     max_tree_depth: int = 10,
 ) -> SampleResult:
     """Run the adaptive geometry sampler.
@@ -57,19 +66,19 @@ def sample(
     num_samples : int
         Number of post-warmup samples per chain.
     warmup_steps : int
-        Number of adaptation steps.
+        Total warmup steps (includes NUTS warmup when using a flow).
     seed : int
         Random seed.
     kernel : str
-        "mclmc" (primary) or "nuts" (fallback).
+        "mclmc" (primary) or "nuts" (fallback) for production sampling.
     initial_step_size : float
-        Starting step size for adaptation.
+        Starting step size.
     initial_L : float
-        MCLMC trajectory length (ignored for NUTS).
+        MCLMC trajectory length.
     dense_mass : bool
-        Use dense mass matrix (NUTS only).
+        Use dense mass matrix.
     target_accept : float
-        Target acceptance rate (NUTS only).
+        Target acceptance rate for NUTS.
     transform_module : module, optional
         Transform module (e.g., affine_coupling). None = identity.
     flow_params : pytree, optional
@@ -80,6 +89,9 @@ def sample(
         Number of optimizer steps per flow training round.
     flow_lr : float
         Learning rate for flow optimizer.
+    nuts_warmup_steps : int, optional
+        Number of NUTS warmup steps before switching to the production
+        kernel.  Defaults to warmup_steps // 2 when using a flow.
     max_tree_depth : int
         Maximum NUTS tree depth.
 
@@ -95,6 +107,10 @@ def sample(
     dim = model.ndim
     logdensity_fn = model.log_density_fn
 
+    # Default NUTS warmup: half of total warmup when using flow
+    if nuts_warmup_steps is None:
+        nuts_warmup_steps = warmup_steps // 2 if use_flow else 0
+
     # --- Initialize transform ---
     rng_key, flow_key = jax.random.split(rng_key)
     if flow_params is None:
@@ -102,66 +118,146 @@ def sample(
 
     # --- Initialize flow optimizer ---
     opt_state = None
+    optimizer = None
     if use_flow:
-        try:
-            import optax
-            optimizer = optax.adam(flow_lr)
-            opt_state = optimizer.init(flow_params)
-        except ImportError:
-            raise ImportError(
-                "optax is required for flow training. "
-                "Install with: pip install optax"
-            )
+        import optax
+        optimizer = optax.adam(flow_lr)
+        opt_state = optimizer.init(flow_params)
 
     # --- Initialize chains ---
     rng_key, init_key = jax.random.split(rng_key)
     init_keys = jax.random.split(init_key, num_chains)
-    initial_positions = jax.random.normal(init_key, shape=(num_chains, dim)) * 0.1
+    # Wider initialization to help explore (important for funnels)
+    initial_positions = jax.random.normal(init_key, shape=(num_chains, dim))
 
-    # Build initial transformed log-density
+    # --- Phase 1: NUTS warmup for exploration ---
+    # (skipped when not using a flow, or when kernel is already NUTS
+    #  and no separate NUTS warmup is requested)
+
+    inv_mass = jnp.ones(dim) if not dense_mass else jnp.eye(dim)
+    step_size = initial_step_size
+    ss_state = ss_adapt.init(initial_step_size)
+    mm_state = mm_adapt.init(dim, dense=dense_mass)
+
+    # Sample buffer: stores model-space positions for flow training
+    max_buffer = max(warmup_steps * num_chains, 1)
+    sample_buffer = []
+
+    flow_losses = []
+
+    if nuts_warmup_steps > 0 and use_flow:
+        print(f"  Phase 1: NUTS warmup ({nuts_warmup_steps} steps)...")
+
+        # Initialize NUTS states (no transform yet — work in model space)
+        def _nuts_init(pos):
+            return nuts.init(pos, logdensity_fn)
+        nuts_states = jax.vmap(_nuts_init)(initial_positions)
+
+        for step in range(nuts_warmup_steps):
+            rng_key, step_key = jax.random.split(rng_key)
+            step_keys = jax.random.split(step_key, num_chains)
+
+            kern = nuts.build_kernel(
+                logdensity_fn, step_size, inv_mass, max_tree_depth
+            )
+            nuts_states, infos = jax.vmap(kern)(step_keys, nuts_states)
+
+            # Adapt step size and mass matrix
+            mean_accept = jnp.mean(infos.acceptance_rate)
+            ss_state = ss_adapt.update(ss_state, mean_accept, target_accept)
+            step_size = ss_adapt.get_step_size(ss_state)
+            for c in range(num_chains):
+                mm_state = mm_adapt.update(mm_state, nuts_states.position[c])
+            inv_mass = mm_adapt.get_inverse_mass_matrix(mm_state)
+
+            # Accumulate model-space positions
+            for c in range(num_chains):
+                sample_buffer.append(nuts_states.position[c])
+
+            # Periodic flow training during NUTS warmup
+            if (step + 1) % flow_train_interval == 0 and len(sample_buffer) >= dim * 2:
+                flow_params, opt_state, new_losses = _train_flow(
+                    flow_params, opt_state, sample_buffer,
+                    logdensity_fn, transform_module, optimizer,
+                    flow_train_steps,
+                )
+                flow_losses.extend(new_losses)
+
+        # Final flow training on all NUTS samples
+        if len(sample_buffer) >= dim * 2:
+            print(f"  Phase 2: Training flow on {len(sample_buffer)} NUTS samples...")
+            flow_params, opt_state, new_losses = _train_flow(
+                flow_params, opt_state, sample_buffer,
+                logdensity_fn, transform_module, optimizer,
+                flow_train_steps * 5,  # more steps for the final round
+            )
+            flow_losses.extend(new_losses)
+            if new_losses:
+                print(f"    Flow loss: {new_losses[0]:.2f} -> {new_losses[-1]:.2f}")
+
+        # Extract model-space positions from NUTS states for handoff
+        nuts_model_positions = nuts_states.position
+
+        # Remaining warmup steps for the production kernel
+        remaining_warmup = warmup_steps - nuts_warmup_steps
+
+        # Fix NUTS step size
+        step_size = ss_adapt.get_step_size(ss_state, final=True)
+    else:
+        nuts_model_positions = initial_positions
+        remaining_warmup = warmup_steps
+
+    # --- Phase 3: Production sampling ---
+    # Build transformed log-density with trained flow
     transformed_logdensity = transform_module.make_transformed_logdensity(
         flow_params, logdensity_fn
     )
 
-    # Initialize kernel states (in z-space)
+    # Initialize production kernel states in z-space
+    if use_flow:
+        # Map NUTS positions (model space) -> z-space via flow inverse
+        z_positions = jax.vmap(
+            partial(transform_module.inverse, flow_params)
+        )(nuts_model_positions)
+    else:
+        z_positions = nuts_model_positions
+
     if kernel == "mclmc":
+        rng_key, vel_key = jax.random.split(rng_key)
+        vel_keys = jax.random.split(vel_key, num_chains)
         def _mclmc_init(pos, key):
             return mclmc.init(pos, transformed_logdensity, key)
-        states = jax.vmap(_mclmc_init)(initial_positions, init_keys)
+        states = jax.vmap(_mclmc_init)(z_positions, vel_keys)
+
+        # Reset step size adaptation for MCLMC
+        step_size = initial_step_size
+        ss_state = ss_adapt.init(initial_step_size)
+        L = initial_L
     else:
-        def _nuts_init(pos):
+        def _nuts_init_z(pos):
             return nuts.init(pos, transformed_logdensity)
-        states = jax.vmap(_nuts_init)(initial_positions)
+        states = jax.vmap(_nuts_init_z)(z_positions)
+        L = initial_L
 
-    # --- Initialize adaptation ---
-    ss_state = ss_adapt.init(initial_step_size)
-    mm_state = mm_adapt.init(dim, dense=dense_mass)
+    if kernel == "mclmc":
+        print(f"  Phase 3: MCLMC sampling ({remaining_warmup} warmup + {num_samples} samples)...")
+    else:
+        print(f"  Phase 3: NUTS sampling ({remaining_warmup} warmup + {num_samples} samples)...")
 
-    # --- Sampling loop state ---
-    total_steps = warmup_steps + num_samples
+    total_steps = remaining_warmup + num_samples
     all_samples = jnp.zeros((num_chains, num_samples, dim))
     all_log_probs = jnp.zeros((num_chains, num_samples))
     divergence_count = 0
     total_accept = 0.0
 
-    step_size = initial_step_size
-    L = initial_L
-    inv_mass = jnp.ones(dim) if not dense_mass else jnp.eye(dim)
-
-    # Sample buffer for flow training: accumulate model-space positions
-    # Ring buffer of size (buffer_size, dim)
-    buffer_size = flow_train_interval * num_chains
-    sample_buffer = jnp.zeros((buffer_size, dim))
-    buffer_idx = 0
-    buffer_count = 0  # how many samples have been added total
-
-    flow_losses = []
+    # Clear buffer for production-phase flow refinement
+    sample_buffer = []
 
     for step in range(total_steps):
         rng_key, step_key = jax.random.split(rng_key)
         step_keys = jax.random.split(step_key, num_chains)
 
-        # Build kernel with current parameters
+        # Build kernel
         if kernel == "mclmc":
             kern = mclmc.build_kernel(transformed_logdensity, step_size, L)
         else:
@@ -172,21 +268,16 @@ def sample(
         # Step all chains
         states, infos = jax.vmap(kern)(step_keys, states)
 
-        # --- Accumulate model-space positions in buffer ---
+        # Get model-space positions
         if use_flow:
-            # Map z -> x (model space) for the buffer
             model_positions = jax.vmap(
                 partial(transform_module.forward, flow_params)
             )(states.position)
+        else:
+            model_positions = states.position
 
-            for c in range(num_chains):
-                idx = buffer_idx % buffer_size
-                sample_buffer = sample_buffer.at[idx].set(model_positions[c])
-                buffer_idx += 1
-                buffer_count += 1
-
-        # --- Adaptation (during warmup) ---
-        if step < warmup_steps:
+        # Adaptation during remaining warmup
+        if step < remaining_warmup:
             mean_accept = jnp.mean(infos.acceptance_rate)
 
             if kernel == "nuts":
@@ -205,105 +296,60 @@ def sample(
                 step_size = ss_adapt.get_step_size(ss_state)
                 L = jnp.maximum(L, step_size * jnp.sqrt(dim))
 
-            # --- Flow training ---
-            if use_flow and (step + 1) % flow_train_interval == 0 and buffer_count >= dim * 2:
-                rng_key, train_key = jax.random.split(rng_key)
+            # Accumulate for flow refinement
+            if use_flow:
+                for c in range(num_chains):
+                    sample_buffer.append(model_positions[c])
 
-                # Use all available buffer samples (up to buffer_size)
-                n_available = min(buffer_count, buffer_size)
-                train_batch = sample_buffer[:n_available]
+            # Periodic flow refinement
+            if use_flow and (step + 1) % flow_train_interval == 0 and len(sample_buffer) >= dim * 2:
+                # Save old model positions before flow update
+                old_model_positions = model_positions
 
-                # Decay learning rate: reduce flow updates over time
-                # to satisfy Robbins-Monro conditions for ergodicity
-                decay = 1.0 / (1.0 + step / warmup_steps)
+                flow_params, opt_state, new_losses = _train_flow(
+                    flow_params, opt_state, sample_buffer,
+                    logdensity_fn, transform_module, optimizer,
+                    flow_train_steps,
+                )
+                flow_losses.extend(new_losses)
 
-                for _ in range(flow_train_steps):
-                    flow_params, opt_state, loss = sm.train_step(
-                        flow_params,
-                        opt_state,
-                        train_batch,
-                        logdensity_fn,
-                        transform_module.forward,
-                        transform_module.log_det_jac,
-                        transform_module.inverse,
-                        optimizer,
-                    )
-                    flow_losses.append(float(loss))
-
-                # --- Remap chain states to new z-space ---
-                # Old z -> x via old flow was already computed (model_positions)
-                # x -> new z via updated flow's inverse
+                # Rebuild transformed log-density
                 transformed_logdensity = transform_module.make_transformed_logdensity(
                     flow_params, logdensity_fn
                 )
 
-                # Recompute z-space positions and gradients for all chains
-                if not use_flow:
-                    pass  # identity, nothing to remap
+                # Remap chain states: x (old model positions) -> new z
+                new_z = jax.vmap(
+                    partial(transform_module.inverse, flow_params)
+                )(old_model_positions)
+
+                def _reinit_state(z):
+                    lp, grad = jax.value_and_grad(transformed_logdensity)(z)
+                    return z, lp, grad
+
+                new_z, new_lp, new_grad = jax.vmap(_reinit_state)(new_z)
+
+                if kernel == "mclmc":
+                    states = KernelState(
+                        position=new_z,
+                        log_prob=new_lp,
+                        log_prob_grad=new_grad,
+                        aux=states.aux,  # preserve velocity
+                    )
                 else:
-                    model_positions = jax.vmap(
-                        partial(transform_module.forward, flow_params)
-                    )(states.position)
-                    # Actually: we need to go x -> z_new
-                    # But we already have model_positions from above (before flow update)
-                    # Wait — model_positions was computed with the OLD flow params.
-                    # We saved them before the flow update. But we need to
-                    # recompute because flow_params changed.
-                    #
-                    # Correct approach:
-                    # 1. We have z_old (states.position) in OLD z-space
-                    # 2. Map to model space: x = old_forward(z_old) — but old flow_params
-                    #    are gone. We computed model_positions before the training loop
-                    #    with the old params. But that was done before the flow update.
-                    #    Actually we do have model_positions from the buffer accumulation
-                    #    step above, which used the OLD flow_params. But we should store
-                    #    them explicitly.
-                    #
-                    # Simpler: the buffer stores model-space positions. We already
-                    # have the latest model_positions from the buffer accumulation.
-                    # Use those (computed with old flow before the update).
-                    #
-                    # x = model_positions (from old flow, still correct model-space coords)
-                    # z_new = new_inverse(x)
-                    new_z = jax.vmap(
-                        partial(transform_module.inverse, flow_params)
-                    )(model_positions)
+                    states = KernelState(
+                        position=new_z,
+                        log_prob=new_lp,
+                        log_prob_grad=new_grad,
+                    )
 
-                    # Recompute log_prob and grad at new z positions
-                    def _reinit_state(z):
-                        lp, grad = jax.value_and_grad(transformed_logdensity)(z)
-                        return z, lp, grad
+        elif step == remaining_warmup:
+            if kernel == "nuts":
+                step_size = ss_adapt.get_step_size(ss_state, final=True)
 
-                    new_z, new_lp, new_grad = jax.vmap(_reinit_state)(new_z)
-
-                    if kernel == "mclmc":
-                        # Preserve velocity direction, rescale to match new space
-                        old_velocity = states.aux
-                        states = KernelState(
-                            position=new_z,
-                            log_prob=new_lp,
-                            log_prob_grad=new_grad,
-                            aux=old_velocity,
-                        )
-                    else:
-                        states = KernelState(
-                            position=new_z,
-                            log_prob=new_lp,
-                            log_prob_grad=new_grad,
-                        )
-
-        elif step == warmup_steps and kernel == "nuts":
-            step_size = ss_adapt.get_step_size(ss_state, final=True)
-
-        # --- Collect post-warmup samples ---
-        sample_idx = step - warmup_steps
-        if step >= warmup_steps:
-            if use_flow:
-                model_positions = jax.vmap(
-                    partial(transform_module.forward, flow_params)
-                )(states.position)
-            else:
-                model_positions = states.position
+        # Collect post-warmup samples
+        sample_idx = step - remaining_warmup
+        if step >= remaining_warmup:
             all_samples = all_samples.at[:, sample_idx, :].set(model_positions)
             all_log_probs = all_log_probs.at[:, sample_idx].set(states.log_prob)
             divergence_count += int(jnp.sum(infos.is_divergent))
@@ -335,3 +381,31 @@ def sample(
         convergence_history=conv_state,
         param_names=model.param_names,
     )
+
+
+def _train_flow(
+    flow_params, opt_state, sample_buffer,
+    logdensity_fn, transform_module, optimizer,
+    n_steps,
+):
+    """Run score matching training on buffered samples.
+
+    Returns updated flow_params, opt_state, and list of losses.
+    """
+    train_batch = jnp.stack(sample_buffer)
+    losses = []
+
+    for _ in range(n_steps):
+        flow_params, opt_state, loss = sm.train_step(
+            flow_params,
+            opt_state,
+            train_batch,
+            logdensity_fn,
+            transform_module.forward,
+            transform_module.log_det_jac,
+            transform_module.inverse,
+            optimizer,
+        )
+        losses.append(float(loss))
+
+    return flow_params, opt_state, losses

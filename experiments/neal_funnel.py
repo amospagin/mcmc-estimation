@@ -99,8 +99,8 @@ def run_experiment(
     results["mclmc_baseline"] = _summarize(res_mclmc, t_mclmc)
     print(f"  Time: {t_mclmc:.1f}s, R-hat max: {results['mclmc_baseline']['rhat_max']:.4f}")
 
-    # --- 2. MCLMC + flow (our method) ---
-    print(f"Running MCLMC + flow (dim={dim})...")
+    # --- 2. NUTS + flow -> MCLMC (our method: hybrid warmup) ---
+    print(f"\nRunning hybrid NUTS->flow->MCLMC (dim={dim})...")
     try:
         from agsampler.transforms import affine_coupling
         t0 = time.time()
@@ -115,17 +115,19 @@ def run_experiment(
             initial_L=1.0,
             transform_module=affine_coupling,
             flow_train_interval=50,
+            flow_train_steps=20,
         )
         t_flow = time.time() - t0
-        results["mclmc_flow"] = _summarize(res_flow, t_flow)
-        results["mclmc_flow"]["flow_losses"] = res_flow.stats.get("flow_losses", [])
-        print(f"  Time: {t_flow:.1f}s, R-hat max: {results['mclmc_flow']['rhat_max']:.4f}")
+        results["hybrid_flow"] = _summarize(res_flow, t_flow)
+        results["hybrid_flow"]["flow_losses"] = res_flow.stats.get("flow_losses", [])
+        print(f"  Time: {t_flow:.1f}s, R-hat max: {results['hybrid_flow']['rhat_max']:.4f}")
         if res_flow.stats.get("flow_losses"):
             losses = res_flow.stats["flow_losses"]
             print(f"  Flow loss: {losses[0]:.2f} -> {losses[-1]:.2f} ({len(losses)} steps)")
     except Exception as e:
-        print(f"  Flow experiment failed: {e}")
-        results["mclmc_flow"] = {"error": str(e)}
+        import traceback
+        traceback.print_exc()
+        results["hybrid_flow"] = {"error": str(e)}
 
     # --- 3. NUTS baseline ---
     print(f"Running NUTS baseline (dim={dim})...")
