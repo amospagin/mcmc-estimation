@@ -4,8 +4,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from agnuts.transforms import base as identity_transform
-from agnuts.transforms import affine_coupling
+from ag.transforms import base as identity_transform
+from ag.transforms import affine_coupling
 
 
 class TestIdentityTransform:
@@ -102,7 +102,7 @@ class TestScoreMatching:
     def test_loss_low_for_identity_on_gaussian(self):
         """Score matching loss should be low when flow is identity
         and target is N(0,I) (score = -x, which matches -z when flow=identity)."""
-        from agnuts.transforms.score_matching import score_matching_loss
+        from ag.transforms.score_matching import score_matching_loss
 
         dim = 3
 

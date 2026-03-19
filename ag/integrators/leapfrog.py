@@ -3,7 +3,7 @@
 import jax
 import jax.numpy as jnp
 
-from agnuts.types import IntegratorState
+from ag.types import IntegratorState
 
 
 def leapfrog_step(
