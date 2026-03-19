@@ -6,22 +6,16 @@ so that in the transformed space the target becomes approximately
 standard normal.
 
 Score matching loss:
-    L(θ) = E_chain[ ||∇_z log q_θ(z) - ∇_z log π̃_θ(z)||² ]
-
-where π̃_θ(z) = π(f_θ(z)) |det Jf_θ(z)| is the pullback density.
-
-If the flow were perfect, ∇_z log π̃_θ(z) = -z (standard normal score).
-So we can simplify to:
-
     L(θ) = E_chain[ ||∇_z log π̃_θ(z) + z||² ]
 
-which pushes the transformed density toward N(0, I).
+If the flow were perfect, the pullback density would be N(0, I),
+whose score is -z.  So this loss pushes the transformed density
+toward standard normal.
 """
 
 import jax
 import jax.numpy as jnp
 from jax import Array
-from typing import Any
 
 
 def score_matching_loss(
@@ -66,7 +60,7 @@ def score_matching_loss(
         score_z = jax.grad(log_pullback)(z)
 
         # Target score for N(0,I) is -z
-        # Loss: ||score_z - (-z)||^2 = ||score_z + z||^2
+        # Loss: ||score_z + z||^2
         return jnp.sum((score_z + z) ** 2)
 
     losses = jax.vmap(single_loss)(positions)
@@ -90,7 +84,7 @@ def train_step(
     flow_params : pytree
         Current flow parameters.
     opt_state : pytree
-        Optimizer state (e.g., from optax).
+        Optimizer state (from optax).
     positions : Array, shape (batch, D)
         Batch of positions to train on.
     logdensity_fn, flow_forward_fn, flow_log_det_jac_fn, flow_inverse_fn
@@ -104,16 +98,13 @@ def train_step(
     opt_state : updated optimizer state
     loss : float, the loss before the update
     """
+    import optax
+
     loss, grads = jax.value_and_grad(score_matching_loss)(
         flow_params, positions, logdensity_fn,
         flow_forward_fn, flow_log_det_jac_fn, flow_inverse_fn,
     )
     updates, opt_state = optimizer.update(grads, opt_state, flow_params)
-    try:
-        import optax
-        flow_params = optax.apply_updates(flow_params, updates)
-    except ImportError:
-        # Fallback: manual param update (tree_map)
-        flow_params = jax.tree.map(lambda p, u: p + u, flow_params, updates)
+    flow_params = optax.apply_updates(flow_params, updates)
 
     return flow_params, opt_state, loss

@@ -118,7 +118,11 @@ def run_experiment(
         )
         t_flow = time.time() - t0
         results["mclmc_flow"] = _summarize(res_flow, t_flow)
+        results["mclmc_flow"]["flow_losses"] = res_flow.stats.get("flow_losses", [])
         print(f"  Time: {t_flow:.1f}s, R-hat max: {results['mclmc_flow']['rhat_max']:.4f}")
+        if res_flow.stats.get("flow_losses"):
+            losses = res_flow.stats["flow_losses"]
+            print(f"  Flow loss: {losses[0]:.2f} -> {losses[-1]:.2f} ({len(losses)} steps)")
     except Exception as e:
         print(f"  Flow experiment failed: {e}")
         results["mclmc_flow"] = {"error": str(e)}
