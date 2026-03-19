@@ -26,11 +26,13 @@ class KernelState(NamedTuple):
     """Minimal state that persists between MCMC transitions.
 
     This is kernel-agnostic: any kernel must be able to produce and consume
-    a KernelState.  Kernel-specific auxiliary data lives in KernelInfo.
+    a KernelState.  Kernel-specific auxiliary data (e.g. MCLMC velocity)
+    lives in the `aux` field.
     """
     position: Array       # (D,)
     log_prob: float
     log_prob_grad: Array  # (D,)
+    aux: Any = None       # kernel-specific persistent state
 
 
 class KernelInfo(NamedTuple):
