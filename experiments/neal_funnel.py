@@ -73,8 +73,8 @@ def make_funnel_model(dim: int = 10) -> Model:
 def run_experiment(
     dim: int = 10,
     num_chains: int = 4,
-    num_samples: int = 2000,
-    warmup_steps: int = 1000,
+    num_samples: int = 500,
+    warmup_steps: int = 500,
     seed: int = 42,
 ):
     """Run all three methods and compare."""

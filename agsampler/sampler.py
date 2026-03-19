@@ -176,20 +176,22 @@ def sample(
 
             # Periodic flow training during NUTS warmup
             if (step + 1) % flow_train_interval == 0 and len(sample_buffer) >= dim * 2:
+                rng_key, train_key = jax.random.split(rng_key)
                 flow_params, opt_state, new_losses = _train_flow(
                     flow_params, opt_state, sample_buffer,
                     logdensity_fn, transform_module, optimizer,
-                    flow_train_steps,
+                    flow_train_steps, rng_key=train_key,
                 )
                 flow_losses.extend(new_losses)
 
         # Final flow training on all NUTS samples
         if len(sample_buffer) >= dim * 2:
             print(f"  Phase 2: Training flow on {len(sample_buffer)} NUTS samples...")
+            rng_key, train_key = jax.random.split(rng_key)
             flow_params, opt_state, new_losses = _train_flow(
                 flow_params, opt_state, sample_buffer,
                 logdensity_fn, transform_module, optimizer,
-                flow_train_steps * 5,  # more steps for the final round
+                flow_train_steps * 5, rng_key=train_key,
             )
             flow_losses.extend(new_losses)
             if new_losses:
@@ -306,10 +308,11 @@ def sample(
                 # Save old model positions before flow update
                 old_model_positions = model_positions
 
+                rng_key, train_key = jax.random.split(rng_key)
                 flow_params, opt_state, new_losses = _train_flow(
                     flow_params, opt_state, sample_buffer,
                     logdensity_fn, transform_module, optimizer,
-                    flow_train_steps,
+                    flow_train_steps, rng_key=train_key,
                 )
                 flow_losses.extend(new_losses)
 
@@ -386,20 +389,33 @@ def sample(
 def _train_flow(
     flow_params, opt_state, sample_buffer,
     logdensity_fn, transform_module, optimizer,
-    n_steps,
+    n_steps, batch_size=64, rng_key=None,
 ):
-    """Run score matching training on buffered samples.
+    """Run score matching training on buffered samples with mini-batching.
+
+    Uses random mini-batches to keep memory bounded regardless of
+    buffer size.
 
     Returns updated flow_params, opt_state, and list of losses.
     """
-    train_batch = jnp.stack(sample_buffer)
+    all_samples = jnp.stack(sample_buffer)
+    n_total = all_samples.shape[0]
+    batch_size = min(batch_size, n_total)
     losses = []
 
-    for _ in range(n_steps):
+    if rng_key is None:
+        rng_key = jax.random.key(0)
+
+    for i in range(n_steps):
+        # Random mini-batch
+        rng_key, batch_key = jax.random.split(rng_key)
+        indices = jax.random.choice(batch_key, n_total, shape=(batch_size,), replace=False)
+        batch = all_samples[indices]
+
         flow_params, opt_state, loss = sm.train_step(
             flow_params,
             opt_state,
-            train_batch,
+            batch,
             logdensity_fn,
             transform_module.forward,
             transform_module.log_det_jac,
