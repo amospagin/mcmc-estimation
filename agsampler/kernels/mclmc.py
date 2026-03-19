@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from ag.types import KernelState, KernelInfo, IntegratorState
+from agsampler.types import KernelState, KernelInfo, IntegratorState
 
 
 # ---------------------------------------------------------------------------

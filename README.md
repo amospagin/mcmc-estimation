@@ -59,8 +59,8 @@ AG closes the loop: the flow trains *during* MCMC using the exact score (grad lo
 
 ```python
 import jax.numpy as jnp
-from ag import Model
-from ag.sampler import sample
+from agsampler import Model
+from agsampler.sampler import sample
 
 # Define a model via its log-density
 def log_density(params):
@@ -78,8 +78,8 @@ print(result.convergence_history.rhat) # should be near 1.0
 With a learned flow:
 
 ```python
-from ag.transforms import affine_coupling
-from ag.sampler import sample
+from agsampler.transforms import affine_coupling
+from agsampler.sampler import sample
 
 result = sample(
     model,
@@ -93,7 +93,7 @@ result = sample(
 ## Project structure
 
 ```
-ag/
+agsampler/
   model.py                      Model API (log-density wrapper)
   sampler.py                    Main entry point — orchestrates everything
   types.py                      Kernel-agnostic state types

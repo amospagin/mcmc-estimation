@@ -6,7 +6,7 @@ NUTS, 0.65 for HMC, or tuned for MCLMC energy error).
 
 import jax.numpy as jnp
 
-from ag.types import DualAveragingState
+from agsampler.types import DualAveragingState
 
 
 def init(initial_step_size: float) -> DualAveragingState:

@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from ag.adaptation import step_size, mass_matrix
+from agsampler.adaptation import step_size, mass_matrix
 
 
 class TestDualAveraging:

@@ -9,7 +9,7 @@ Supports diagonal (default) and dense estimation.
 import jax.numpy as jnp
 from jax import Array
 
-from ag.types import WelfordState
+from agsampler.types import WelfordState
 
 
 def init(dim: int, dense: bool = False) -> WelfordState:

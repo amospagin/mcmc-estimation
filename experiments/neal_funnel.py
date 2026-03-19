@@ -32,8 +32,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ag.model import Model
-from ag.sampler import sample
+from agsampler.model import Model
+from agsampler.sampler import sample
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def run_experiment(
     # --- 2. MCLMC + flow (our method) ---
     print(f"Running MCLMC + flow (dim={dim})...")
     try:
-        from ag.transforms import affine_coupling
+        from agsampler.transforms import affine_coupling
         t0 = time.time()
         res_flow = sample(
             model,

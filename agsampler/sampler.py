@@ -19,13 +19,13 @@ import jax.numpy as jnp
 from jax import Array
 from functools import partial
 
-from ag.types import KernelState, SampleResult, ConvergenceState
-from ag.model import Model
-from ag.kernels import mclmc, nuts
-from ag.transforms import base as identity_transform
-from ag.transforms import score_matching as sm
-from ag.adaptation import step_size as ss_adapt, mass_matrix as mm_adapt
-from ag.diagnostics import convergence as conv
+from agsampler.types import KernelState, SampleResult, ConvergenceState
+from agsampler.model import Model
+from agsampler.kernels import mclmc, nuts
+from agsampler.transforms import base as identity_transform
+from agsampler.transforms import score_matching as sm
+from agsampler.adaptation import step_size as ss_adapt, mass_matrix as mm_adapt
+from agsampler.diagnostics import convergence as conv
 
 
 def sample(

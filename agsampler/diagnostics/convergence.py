@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-from ag.types import ConvergenceState
+from agsampler.types import ConvergenceState
 
 
 def init(dim: int) -> ConvergenceState:

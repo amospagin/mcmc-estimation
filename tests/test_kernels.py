@@ -4,8 +4,8 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from ag.kernels import mclmc, nuts
-from ag.types import KernelState
+from agsampler.kernels import mclmc, nuts
+from agsampler.types import KernelState
 
 
 def _standard_normal_logdensity(x):

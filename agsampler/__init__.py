@@ -4,7 +4,7 @@ Combines learned reparameterization (normalizing flows) with fast dynamics
 (MCLMC / NUTS) and online adaptation to create a self-improving MCMC sampler.
 """
 
-from ag.model import Model
+from agsampler.model import Model
 
 __version__ = "0.1.0"
 __all__ = ["Model"]

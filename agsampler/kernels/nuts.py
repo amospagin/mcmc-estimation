@@ -16,9 +16,9 @@ import jax.numpy as jnp
 from jax import Array
 from typing import NamedTuple
 
-from ag.types import KernelState, KernelInfo, IntegratorState
-from ag.integrators.leapfrog import leapfrog_step
-from ag.integrators.utils import kinetic_energy, generate_momentum, total_energy
+from agsampler.types import KernelState, KernelInfo, IntegratorState
+from agsampler.integrators.leapfrog import leapfrog_step
+from agsampler.integrators.utils import kinetic_energy, generate_momentum, total_energy
 
 
 MAX_TREE_DEPTH = 10

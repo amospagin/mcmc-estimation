@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from ag.diagnostics import convergence
+from agsampler.diagnostics import convergence
 
 
 class TestSplitRhat:

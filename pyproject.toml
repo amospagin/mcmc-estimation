@@ -28,7 +28,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["ag*"]
+include = ["agsampler*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

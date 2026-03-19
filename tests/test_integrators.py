@@ -4,9 +4,9 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from ag.types import IntegratorState
-from ag.integrators.leapfrog import leapfrog_step
-from ag.integrators.utils import kinetic_energy, generate_momentum, total_energy
+from agsampler.types import IntegratorState
+from agsampler.integrators.leapfrog import leapfrog_step
+from agsampler.integrators.utils import kinetic_energy, generate_momentum, total_energy
 
 
 def _standard_normal_logdensity(x):
